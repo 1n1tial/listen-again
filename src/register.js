@@ -1,4 +1,9 @@
-import { AWW_COMMAND, INVITE_COMMAND } from './commands.js';
+import {
+  SESSION_START_COMMAND,
+  SESSION_END_COMMAND,
+  VOTE_START_COMMAND,
+  VOTE_END_COMMAND,
+} from './commands.js';
 import dotenv from 'dotenv';
 import process from 'node:process';
 
@@ -34,7 +39,12 @@ const response = await fetch(url, {
     Authorization: `Bot ${token}`,
   },
   method: 'PUT',
-  body: JSON.stringify([AWW_COMMAND, INVITE_COMMAND]),
+  body: JSON.stringify([
+    SESSION_START_COMMAND,
+    SESSION_END_COMMAND,
+    VOTE_START_COMMAND,
+    VOTE_END_COMMAND,
+  ]),
 });
 
 if (response.ok) {

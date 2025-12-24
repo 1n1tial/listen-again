@@ -2,7 +2,14 @@ name = "listen-again"
 main = "./src/server.js"
 compatibility_date="2025-12-24"
 
+kv_namespaces = [
+  { binding = "DB", id = "fa418a94366340bfb1588a63efc3b74f" }
+]
+
 # [secrets]
 # DISCORD_TOKEN
 # DISCORD_PUBLIC_KEY
 # DISCORD_APPLICATION_ID
+# MANAGER_USER_ID
+# YOUTUBE_API_KEY
+
