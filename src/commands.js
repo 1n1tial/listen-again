@@ -6,6 +6,14 @@
 export const SESSION_START_COMMAND = {
   name: 'session-start',
   description: 'Start a new listening session (Clears previous history)',
+  options: [
+    {
+      name: 'playlist_url',
+      description: 'Optional: YouTube Playlist URL to load',
+      type: 3, // STRING
+      required: false, // optional
+    },
+  ],
 };
 
 export const SESSION_END_COMMAND = {
@@ -24,6 +32,11 @@ export const VOTE_START_COMMAND = {
       required: true,
     },
   ],
+};
+
+export const VOTE_NEXT_COMMAND = {
+  name: 'vote-next',
+  description: 'Play the next song in the loaded playlist',
 };
 
 export const VOTE_END_COMMAND = {

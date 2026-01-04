@@ -13,6 +13,7 @@ import {
   SESSION_END_COMMAND,
   VOTE_START_COMMAND,
   VOTE_END_COMMAND,
+  VOTE_NEXT_COMMAND
 } from './commands.js';
 
 class JsonResponse extends Response {
@@ -30,18 +31,46 @@ const router = AutoRouter();
 // --- HELPER FUNCTIONS ---
 
 // Extract ID from YouTube URL
-function getYoutubeId(url) {
+function getVideoId(url) {
   const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
   const match = url.match(regExp);
   return match && match[2].length === 11 ? match[2] : null;
 }
 
+function getPlaylistId(url) {
+  const regExp = /[?&]list=([^#&]+)/;
+  const match = url.match(regExp);
+  return match && match[1] ? match[1] : null;
+}
+
 // Fetch Title from YouTube API
-async function getYoutubeTitle(videoId, apiKey) {
+async function getVideoTitle(videoId, apiKey) {
   const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${videoId}&key=${apiKey}`;
   const response = await fetch(url);
   const data = await response.json();
   return data.items?.[0]?.snippet?.title || 'Unknown Song';
+}
+
+async function getPlaylistTitle(playlistId, apiKey) {
+  const url = `https://www.googleapis.com/youtube/v3/playlists?part=snippet&id=${playlistId}&key=${apiKey}`;
+  const response = await fetch(url);
+  const data = await response.json();
+  return data.items?.[0]?.snippet?.title || 'Unknown Playlist';
+}
+
+// Fetch items from a YouTube Playlist (Max 50 for this version)
+async function getPlaylistItems(playlistId, apiKey) {
+  const url = `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&maxResults=50&playlistId=${playlistId}&key=${apiKey}`;
+  const response = await fetch(url);
+  const data = await response.json();
+  
+  if (!data.items) return [];
+
+  return data.items.map((item) => ({
+    title: item.snippet.title,
+    id: item.snippet.resourceId.videoId,
+    thumbnail: item.snippet.thumbnails?.high?.url || item.snippet.thumbnails?.default?.url
+  }));
 }
 
 // Check if user is the Manager
@@ -94,15 +123,58 @@ router.post('/', async (request, env) => {
             },
           });
         }
+        
+        let initialQueue = [];
+        let startMessage = '**새로운 세션이 시작되었습니다!**';
+
+        const playlistUrlOption = interaction.data.options?.find(
+          (o) => o.name === 'playlist_url',
+        );
+
+        if (playlistUrlOption) {
+          const pid = getPlaylistId(playlistUrlOption.value);
+
+          // Error A: URL format is wrong
+          if (!pid) {
+            return new JsonResponse({
+              type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                content:
+                  '**잘못된 URL입니다.** 유효한 유튜브 플레이리스트 링크를 입력해주세요.',
+                flags: InteractionResponseFlags.EPHEMERAL,
+              },
+            });
+          }
+
+          // Error B: API cannot find playlist or it's empty
+          const items = await getPlaylistItems(pid, env.YOUTUBE_API_KEY);
+          if (items.length === 0) {
+            return new JsonResponse({
+              type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                content:
+                  '**플레이리스트를 불러올 수 없습니다.**\n리스트가 비공개이거나 비어있는 건 아닌지 확인해주세요.',
+                flags: InteractionResponseFlags.EPHEMERAL,
+              },
+            });
+          }
+
+          initialQueue = items;
+          startMessage = `**새로운 세션이 시작되었습니다!**\n**플레이리스트 로딩 완료:** ${items.length}곡 대기 중`;
+        }
+
+        // 3. EXECUTION: Only runs if validation passed
         await env.DB.put('SESSION_ACTIVE', 'true');
         await env.DB.delete('CURRENT_SONG');
         await env.DB.delete('VOTED_USERS');
         await env.DB.delete('HISTORY');
+
+        // Save the valid queue (or empty array if manual)
+        await env.DB.put('QUEUE', JSON.stringify(initialQueue));
+
         return new JsonResponse({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-          data: {
-            content: '**새로운 세션이 시작되었습니다!**',
-          },
+          data: { content: startMessage },
         });
       }
 
@@ -132,7 +204,7 @@ router.post('/', async (request, env) => {
         const url = interaction.data.options.find(
           (o) => o.name === 'url',
         ).value;
-        const vidId = getYoutubeId(url);
+        const vidId = getVideoId(url);
 
         if (!vidId) {
           return new JsonResponse({
@@ -147,7 +219,7 @@ router.post('/', async (request, env) => {
         // Defer response (fetching from YouTube might take >3s)
         // Note: For simplicity in this example, we assume it's fast.
         // If it times out, we'd need a separate "DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE" flow.
-        const title = await getYoutubeTitle(vidId, env.YOUTUBE_API_KEY);
+        const title = await getVideoTitle(vidId, env.YOUTUBE_API_KEY);
 
         // Save State
         await env.DB.put(
@@ -179,6 +251,98 @@ router.post('/', async (request, env) => {
                     style: 1, // Primary Button
                     label: 'また聞きたい!',
                     custom_id: `vote_${vidId}`,
+                  },
+                ],
+              },
+            ],
+          },
+        });
+      }
+
+      case VOTE_NEXT_COMMAND.name: {
+        // 1. Check Session
+        const session_active = await env.DB.get('SESSION_ACTIVE');
+        if (session_active !== 'true') {
+          return new JsonResponse({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: '**현재 진행중인 세션이 없어요.**',
+              flags: InteractionResponseFlags.EPHEMERAL,
+            },
+          });
+        }
+
+        // 2. Check if something is already playing
+        const currentSong = await env.DB.get('CURRENT_SONG');
+        if (currentSong) {
+          return new JsonResponse({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: '이미 재생 중인 음악이 있어요!',
+              flags: InteractionResponseFlags.EPHEMERAL,
+            },
+          });
+        }
+
+        // 3. Load Queue
+        const queueStr = await env.DB.get('QUEUE');
+        let queue = queueStr ? JSON.parse(queueStr) : [];
+
+        if (queue.length === 0) {
+          return new JsonResponse({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content:
+                '**대기열에 남은 곡이 없습니다.** `/vote-start <url>`을 사용하여 직접 추가해주세요.',
+              flags: InteractionResponseFlags.EPHEMERAL,
+            },
+          });
+        }
+
+        // 4. Pop the next song
+        const nextSong = queue.shift(); // Removes the first item
+        const remaining = queue.length;
+
+        // 5. Save updates to DB
+        await env.DB.put('QUEUE', JSON.stringify(queue)); // Save smaller queue
+
+        // Save as current song (Reset votes)
+        await env.DB.put(
+          'CURRENT_SONG',
+          JSON.stringify({
+            title: nextSong.title,
+            id: nextSong.id,
+            votes: 0,
+          }),
+        );
+        await env.DB.put('VOTED_USERS', JSON.stringify([]));
+
+        // 6. Response (Same UI as vote-start)
+        return new JsonResponse({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: `🎶 **다음 곡 재생** (남은 곡: ${remaining}개)`,
+            embeds: [
+              {
+                title: nextSong.title,
+                url: `https://www.youtube.com/watch?v=${nextSong.id}`,
+                image: {
+                  url:
+                    nextSong.thumbnail ||
+                    `https://img.youtube.com/vi/${nextSong.id}/mqdefault.jpg`,
+                },
+                color: 0xff0000,
+              },
+            ],
+            components: [
+              {
+                type: 1,
+                components: [
+                  {
+                    type: 2,
+                    style: 1, // Primary Button
+                    label: 'また聞きたい!',
+                    custom_id: `vote_${nextSong.id}`,
                   },
                 ],
               },
