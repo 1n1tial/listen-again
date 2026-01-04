@@ -321,7 +321,7 @@ router.post('/', async (request, env) => {
         return new JsonResponse({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
-            content: `🎶 **다음 곡 재생** (남은 곡: ${remaining}개)`,
+            content: `🎶 **지금 재생 중** (남은 곡: ${remaining}개)`,
             embeds: [
               {
                 title: nextSong.title,
