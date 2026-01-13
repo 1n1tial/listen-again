@@ -3,7 +3,11 @@ import {
   SESSION_END_COMMAND,
   VOTE_START_COMMAND,
   VOTE_END_COMMAND,
-  VOTE_NEXT_COMMAND
+  VOTE_NEXT_COMMAND,
+  ENTER_COMMAND,
+  EXIT_COMMAND,
+  KICK_COMMAND,
+  PARTICIPANTS_COMMAND
 } from './commands.js';
 import dotenv from 'dotenv';
 import process from 'node:process';
@@ -46,6 +50,10 @@ const response = await fetch(url, {
     VOTE_START_COMMAND,
     VOTE_END_COMMAND,
     VOTE_NEXT_COMMAND,
+    ENTER_COMMAND,
+    EXIT_COMMAND,
+    KICK_COMMAND,
+    PARTICIPANTS_COMMAND,
   ]),
 });
 

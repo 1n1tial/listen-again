@@ -13,7 +13,11 @@ import {
   SESSION_END_COMMAND,
   VOTE_START_COMMAND,
   VOTE_END_COMMAND,
-  VOTE_NEXT_COMMAND
+  VOTE_NEXT_COMMAND,
+  ENTER_COMMAND,
+  EXIT_COMMAND,
+  KICK_COMMAND,
+  PARTICIPANTS_COMMAND
 } from './commands.js';
 
 class JsonResponse extends Response {
@@ -100,8 +104,21 @@ router.post('/', async (request, env) => {
 
   // 2. SLASH COMMANDS
   if (interaction.type === InteractionType.APPLICATION_COMMAND) {
-    // Security: Reject if not the manager
-    if (!isManager(interaction, env)) {
+    const commandName = interaction.data.name.toLowerCase();
+
+    // Define manager-only commands
+    const managerOnlyCommands = [
+      SESSION_START_COMMAND.name,
+      SESSION_END_COMMAND.name,
+      VOTE_START_COMMAND.name,
+      VOTE_END_COMMAND.name,
+      VOTE_NEXT_COMMAND.name,
+      KICK_COMMAND.name,
+      PARTICIPANTS_COMMAND.name
+    ];
+
+    // Security: Check if command requires manager permission
+    if (managerOnlyCommands.includes(commandName) && !isManager(interaction, env)) {
       return new JsonResponse({
         type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
         data: {
@@ -111,7 +128,7 @@ router.post('/', async (request, env) => {
       });
     }
 
-    switch (interaction.data.name.toLowerCase()) {
+    switch (commandName) {
       case SESSION_START_COMMAND.name: {
         const session_active = await env.DB.get('SESSION_ACTIVE');
         if (session_active === 'true') {
@@ -167,7 +184,9 @@ router.post('/', async (request, env) => {
         await env.DB.put('SESSION_ACTIVE', 'true');
         await env.DB.delete('CURRENT_SONG');
         await env.DB.delete('VOTED_USERS');
+        await env.DB.delete('ELIGIBLE_VOTERS');
         await env.DB.delete('HISTORY');
+        await env.DB.put('SESSION_PARTICIPANTS', JSON.stringify([]));
 
         // Save the valid queue (or empty array if manual)
         await env.DB.put('QUEUE', JSON.stringify(initialQueue));
@@ -221,12 +240,16 @@ router.post('/', async (request, env) => {
         // If it times out, we'd need a separate "DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE" flow.
         const title = await getVideoTitle(vidId, env.YOUTUBE_API_KEY);
 
-        // Save State
+        // Save State - Take snapshot of current participants
+        const participantsStr = await env.DB.get('SESSION_PARTICIPANTS');
+        const participants = participantsStr ? JSON.parse(participantsStr) : [];
+
         await env.DB.put(
           'CURRENT_SONG',
           JSON.stringify({ title, id: vidId, votes: 0 }),
         );
-        await env.DB.put('VOTED_USERS', JSON.stringify([]));
+        await env.DB.put('VOTED_USERS', JSON.stringify({}));
+        await env.DB.put('ELIGIBLE_VOTERS', JSON.stringify(participants));
 
         return new JsonResponse({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
@@ -248,9 +271,15 @@ router.post('/', async (request, env) => {
                 components: [
                   {
                     type: 2,
-                    style: 1, // Primary Button
-                    label: 'また聞きたい!',
-                    custom_id: `vote_${vidId}`,
+                    style: 1, // Primary Button (Blue)
+                    label: 'また聞きたい! (1点)',
+                    custom_id: `vote_1_${vidId}`,
+                  },
+                  {
+                    type: 2,
+                    style: 3, // Success Button (Green)
+                    label: '絶対また聞きたい! (2点)',
+                    custom_id: `vote_2_${vidId}`,
                   },
                 ],
               },
@@ -306,6 +335,10 @@ router.post('/', async (request, env) => {
         // 5. Save updates to DB
         await env.DB.put('QUEUE', JSON.stringify(queue)); // Save smaller queue
 
+        // Take snapshot of current participants
+        const participantsStr = await env.DB.get('SESSION_PARTICIPANTS');
+        const participants = participantsStr ? JSON.parse(participantsStr) : [];
+
         // Save as current song (Reset votes)
         await env.DB.put(
           'CURRENT_SONG',
@@ -315,7 +348,8 @@ router.post('/', async (request, env) => {
             votes: 0,
           }),
         );
-        await env.DB.put('VOTED_USERS', JSON.stringify([]));
+        await env.DB.put('VOTED_USERS', JSON.stringify({}));
+        await env.DB.put('ELIGIBLE_VOTERS', JSON.stringify(participants));
 
         // 6. Response (Same UI as vote-start)
         return new JsonResponse({
@@ -340,9 +374,15 @@ router.post('/', async (request, env) => {
                 components: [
                   {
                     type: 2,
-                    style: 1, // Primary Button
-                    label: 'また聞きたい!',
-                    custom_id: `vote_${nextSong.id}`,
+                    style: 1, // Primary Button (Blue)
+                    label: 'また聞きたい! (1点)',
+                    custom_id: `vote_1_${nextSong.id}`,
+                  },
+                  {
+                    type: 2,
+                    style: 3, // Success Button (Green)
+                    label: '絶対また聞きたい! (2点)',
+                    custom_id: `vote_2_${nextSong.id}`,
                   },
                 ],
               },
@@ -364,29 +404,52 @@ router.post('/', async (request, env) => {
         }
 
         const songData = JSON.parse(songDataStr);
-        const votersStr = await env.DB.get('VOTED_USERS');
-        const voters = votersStr ? JSON.parse(votersStr) : [];
-        const currentSessionVotes = voters.length;
+        const votedUsersStr = await env.DB.get('VOTED_USERS');
+        const votedUsers = votedUsersStr ? JSON.parse(votedUsersStr) : {};
+
+        const eligibleVotersStr = await env.DB.get('ELIGIBLE_VOTERS');
+        const eligibleVoters = eligibleVotersStr ? JSON.parse(eligibleVotersStr) : [];
+
+        // Calculate statistics
+        const totalPoints = Object.values(votedUsers).reduce((sum, points) => sum + points, 0);
+        const voterCount = Object.keys(votedUsers).length;
+        const participantCount = eligibleVoters.length;
+        const average = participantCount > 0 ? totalPoints / participantCount : 0;
 
         // Save to History
         const historyStr = await env.DB.get('HISTORY');
         const history = historyStr ? JSON.parse(historyStr) : {};
         if (history[songData.id]) {
-          history[songData.id].votes += currentSessionVotes;
+          history[songData.id].totalPoints += totalPoints;
+          history[songData.id].voterCount += voterCount;
+          history[songData.id].participantCount += participantCount;
         } else {
           history[songData.id] = {
             title: songData.title,
-            votes: currentSessionVotes,
+            totalPoints: totalPoints,
+            voterCount: voterCount,
+            participantCount: participantCount,
           };
         }
         await env.DB.put('HISTORY', JSON.stringify(history));
 
         await env.DB.put('CURRENT_SONG', '');
 
+        // Create result message
+        let resultMessage = `**투표 종료!** (${songData.title})\n`;
+        resultMessage += `**총점**: ${totalPoints}점\n`;
+        resultMessage += `**투표 인원**: ${voterCount}명 / ${participantCount}명\n`;
+        resultMessage += `**평균**: ${average.toFixed(2)}점`;
+
+        // Special message if average > 1
+        if (average > 1) {
+          resultMessage += `\n\n🎉 **素晴らしい！ 高評価の曲です！**`;
+        }
+
         return new JsonResponse({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
-            content: `**투표 종료!** (${songData.title})\n**투표 결과**: ${currentSessionVotes}표`,
+            content: resultMessage,
           },
         });
       }
@@ -421,13 +484,18 @@ router.post('/', async (request, env) => {
 
         let summaryLines = [];
 
-        // Sort by votes (Highest first)
+        // Sort by average score (Highest first)
         const sortedSongs = Object.values(history).sort(
-          (a, b) => b.votes - a.votes,
+          (a, b) => {
+            const avgA = a.participantCount > 0 ? a.totalPoints / a.participantCount : 0;
+            const avgB = b.participantCount > 0 ? b.totalPoints / b.participantCount : 0;
+            return avgB - avgA;
+          }
         );
 
         for (const song of sortedSongs) {
-          summaryLines.push(`• **${song.title}**: ${song.votes} 표`);
+          const average = song.participantCount > 0 ? song.totalPoints / song.participantCount : 0;
+          summaryLines.push(`• **${song.title}**: 평균 ${average.toFixed(2)}점 (${song.voterCount}명 투표)`);
         }
 
         const summary =
@@ -441,6 +509,197 @@ router.post('/', async (request, env) => {
         });
       }
 
+      case ENTER_COMMAND.name: {
+        const session_active = await env.DB.get('SESSION_ACTIVE');
+        if (session_active !== 'true') {
+          return new JsonResponse({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: '**현재 진행중인 세션이 없어요.**',
+              flags: InteractionResponseFlags.EPHEMERAL,
+            },
+          });
+        }
+
+        const userId = interaction.member.user.id;
+        const participantsStr = await env.DB.get('SESSION_PARTICIPANTS');
+        let participants = participantsStr ? JSON.parse(participantsStr) : [];
+
+        if (participants.includes(userId)) {
+          return new JsonResponse({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: '이미 세션에 참여 중입니다.',
+              flags: InteractionResponseFlags.EPHEMERAL,
+            },
+          });
+        }
+
+        participants.push(userId);
+        await env.DB.put('SESSION_PARTICIPANTS', JSON.stringify(participants));
+
+        return new JsonResponse({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: `세션에 참여했습니다! (현재 참여자: ${participants.length}명)`,
+            flags: InteractionResponseFlags.EPHEMERAL,
+          },
+        });
+      }
+
+      case EXIT_COMMAND.name: {
+        const session_active = await env.DB.get('SESSION_ACTIVE');
+        if (session_active !== 'true') {
+          return new JsonResponse({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: '**현재 진행중인 세션이 없어요.**',
+              flags: InteractionResponseFlags.EPHEMERAL,
+            },
+          });
+        }
+
+        const userId = interaction.member.user.id;
+        const participantsStr = await env.DB.get('SESSION_PARTICIPANTS');
+        let participants = participantsStr ? JSON.parse(participantsStr) : [];
+
+        if (!participants.includes(userId)) {
+          return new JsonResponse({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: '세션에 참여 중이 아닙니다.',
+              flags: InteractionResponseFlags.EPHEMERAL,
+            },
+          });
+        }
+
+        // Remove from participants
+        participants = participants.filter(id => id !== userId);
+        await env.DB.put('SESSION_PARTICIPANTS', JSON.stringify(participants));
+
+        // Remove from eligible voters if exists
+        const eligibleVotersStr = await env.DB.get('ELIGIBLE_VOTERS');
+        if (eligibleVotersStr) {
+          let eligibleVoters = JSON.parse(eligibleVotersStr);
+          eligibleVoters = eligibleVoters.filter(id => id !== userId);
+          await env.DB.put('ELIGIBLE_VOTERS', JSON.stringify(eligibleVoters));
+        }
+
+        // Remove from voted users if exists
+        const votedUsersStr = await env.DB.get('VOTED_USERS');
+        if (votedUsersStr) {
+          const votedUsers = JSON.parse(votedUsersStr);
+          if (votedUsers[userId]) {
+            delete votedUsers[userId];
+            await env.DB.put('VOTED_USERS', JSON.stringify(votedUsers));
+          }
+        }
+
+        return new JsonResponse({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: '세션에서 나갔습니다.',
+            flags: InteractionResponseFlags.EPHEMERAL,
+          },
+        });
+      }
+
+      case KICK_COMMAND.name: {
+        const session_active = await env.DB.get('SESSION_ACTIVE');
+        if (session_active !== 'true') {
+          return new JsonResponse({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: '**현재 진행중인 세션이 없어요.**',
+              flags: InteractionResponseFlags.EPHEMERAL,
+            },
+          });
+        }
+
+        const targetUser = interaction.data.options.find(o => o.name === 'user');
+        const targetUserId = targetUser.value;
+
+        const participantsStr = await env.DB.get('SESSION_PARTICIPANTS');
+        let participants = participantsStr ? JSON.parse(participantsStr) : [];
+
+        if (!participants.includes(targetUserId)) {
+          return new JsonResponse({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: '해당 유저는 세션에 참여 중이 아닙니다.',
+              flags: InteractionResponseFlags.EPHEMERAL,
+            },
+          });
+        }
+
+        // Remove from participants
+        participants = participants.filter(id => id !== targetUserId);
+        await env.DB.put('SESSION_PARTICIPANTS', JSON.stringify(participants));
+
+        // Remove from eligible voters if exists
+        const eligibleVotersStr = await env.DB.get('ELIGIBLE_VOTERS');
+        if (eligibleVotersStr) {
+          let eligibleVoters = JSON.parse(eligibleVotersStr);
+          eligibleVoters = eligibleVoters.filter(id => id !== targetUserId);
+          await env.DB.put('ELIGIBLE_VOTERS', JSON.stringify(eligibleVoters));
+        }
+
+        // Remove from voted users if exists
+        const votedUsersStr = await env.DB.get('VOTED_USERS');
+        if (votedUsersStr) {
+          const votedUsers = JSON.parse(votedUsersStr);
+          if (votedUsers[targetUserId]) {
+            delete votedUsers[targetUserId];
+            await env.DB.put('VOTED_USERS', JSON.stringify(votedUsers));
+          }
+        }
+
+        return new JsonResponse({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: '유저를 세션에서 추방했습니다.',
+            flags: InteractionResponseFlags.EPHEMERAL,
+          },
+        });
+      }
+
+      case PARTICIPANTS_COMMAND.name: {
+        const session_active = await env.DB.get('SESSION_ACTIVE');
+        if (session_active !== 'true') {
+          return new JsonResponse({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: '**현재 진행중인 세션이 없어요.**',
+              flags: InteractionResponseFlags.EPHEMERAL,
+            },
+          });
+        }
+
+        const participantsStr = await env.DB.get('SESSION_PARTICIPANTS');
+        const participants = participantsStr ? JSON.parse(participantsStr) : [];
+
+        if (participants.length === 0) {
+          return new JsonResponse({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: '**현재 참여 중인 유저가 없습니다.**',
+              flags: InteractionResponseFlags.EPHEMERAL,
+            },
+          });
+        }
+
+        // Format participant list with mentions
+        const participantList = participants.map(id => `<@${id}>`).join('\n');
+
+        return new JsonResponse({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: `**현재 참여자 목록** (총 ${participants.length}명)\n${participantList}`,
+            flags: InteractionResponseFlags.EPHEMERAL,
+          },
+        });
+      }
+
       default:
         return new JsonResponse({ error: 'Unknown Type' }, { status: 400 });
     }
@@ -450,8 +709,12 @@ router.post('/', async (request, env) => {
   if (interaction.type === InteractionType.MESSAGE_COMPONENT) {
     const customId = interaction.data.custom_id;
 
-    // Check if this is a vote button
-    if (customId.startsWith('vote_')) {
+    // Check if this is a vote button (vote_1_ or vote_2_)
+    const voteMatch = customId.match(/^vote_([12])_(.+)$/);
+    if (voteMatch) {
+      const points = parseInt(voteMatch[1]); // 1 or 2
+      const buttonVidId = voteMatch[2]; // video ID
+
       // 1. Check if Session is Active
       const active = await env.DB.get('SESSION_ACTIVE');
       if (active !== 'true') {
@@ -465,8 +728,6 @@ router.post('/', async (request, env) => {
       }
 
       // 2. LOGIC LOCK: Check if this button belongs to the CURRENT song
-      // We extract the ID from the button (vote_XYZ) and compare it to DB
-      const buttonVidId = customId.replace('vote_', '');
       const currentSongStr = await env.DB.get('CURRENT_SONG');
       const currentSong = currentSongStr ? JSON.parse(currentSongStr) : null;
 
@@ -480,24 +741,54 @@ router.post('/', async (request, env) => {
         });
       }
 
-      // 3. TOGGLE VOTE LOGIC
+      // 3. CHECK ELIGIBILITY
       const userId = interaction.member.user.id;
-      const votersStr = await env.DB.get('VOTED_USERS');
-      let voters = votersStr ? JSON.parse(votersStr) : [];
+
+      // Check if user is in session participants
+      const participantsStr = await env.DB.get('SESSION_PARTICIPANTS');
+      const participants = participantsStr ? JSON.parse(participantsStr) : [];
+
+      if (!participants.includes(userId)) {
+        return new JsonResponse({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: '세션에 참여해야 투표할 수 있습니다. `/enter`를 먼저 사용해주세요.',
+            flags: InteractionResponseFlags.EPHEMERAL,
+          },
+        });
+      }
+
+      // Check if user is eligible to vote for this song
+      const eligibleVotersStr = await env.DB.get('ELIGIBLE_VOTERS');
+      const eligibleVoters = eligibleVotersStr ? JSON.parse(eligibleVotersStr) : [];
+
+      if (!eligibleVoters.includes(userId)) {
+        return new JsonResponse({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: '이 곡은 투표할 수 없습니다. 다음 곡부터 투표 가능합니다.',
+            flags: InteractionResponseFlags.EPHEMERAL,
+          },
+        });
+      }
+
+      // 4. TOGGLE/UPDATE VOTE LOGIC
+      const votedUsersStr = await env.DB.get('VOTED_USERS');
+      let votedUsers = votedUsersStr ? JSON.parse(votedUsersStr) : {};
 
       let message = '';
 
-      if (voters.includes(userId)) {
-        // REMOVE VOTE (Cancel)
-        voters = voters.filter((id) => id !== userId);
+      if (votedUsers[userId] === points) {
+        // REMOVE VOTE (Cancel) - clicking the same button again
+        delete votedUsers[userId];
         message = '투표가 취소되었습니다.';
       } else {
-        // ADD VOTE
-        voters.push(userId);
-        message = '**투표 완료!**';
+        // ADD or UPDATE VOTE
+        votedUsers[userId] = points;
+        message = `**투표 완료!** (${points}점)`;
       }
 
-      await env.DB.put('VOTED_USERS', JSON.stringify(voters));
+      await env.DB.put('VOTED_USERS', JSON.stringify(votedUsers));
 
       // 4. RESPONSE
       // We do NOT update the message button (keeps it static/private).

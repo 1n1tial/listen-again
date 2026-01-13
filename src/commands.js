@@ -43,3 +43,31 @@ export const VOTE_END_COMMAND = {
   name: 'vote-end',
   description: 'Stop voting for the current song and save results',
 };
+
+export const ENTER_COMMAND = {
+  name: 'enter',
+  description: 'Join the current session',
+};
+
+export const EXIT_COMMAND = {
+  name: 'exit',
+  description: 'Leave the current session',
+};
+
+export const KICK_COMMAND = {
+  name: 'kick',
+  description: 'Kick a user from the current session (Manager only)',
+  options: [
+    {
+      name: 'user',
+      description: 'The user to kick from the session',
+      type: 6, // USER
+      required: true,
+    },
+  ],
+};
+
+export const PARTICIPANTS_COMMAND = {
+  name: 'participants',
+  description: 'View list of current session participants (Manager only)',
+};
